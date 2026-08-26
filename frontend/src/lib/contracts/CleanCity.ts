@@ -5,7 +5,7 @@ import { TransactionStatus } from "genlayer-js/types";
 import { parseEther } from "viem";
 
 /**
- * FootballBets contract class for interacting with the GenLayer Football Betting contract
+ * CleanCity contract class for interacting with the GenLayer Clean City contract
  */
 class CleanCity {
   private contractAddress: `0x${string}`;

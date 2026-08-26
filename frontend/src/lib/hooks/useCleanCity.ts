@@ -2,22 +2,14 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import FootballBets from "../contracts/CleanCity";
+import CleanCity from "../contracts/CleanCity";
 import { getContractAddress, getStudioUrl } from "../genlayer/client";
 import { useWallet } from "../genlayer/wallet";
 import { success, error, configError } from "../utils/toast";
 import type { Bounty, Submission, WorkerProfile } from "../contracts/types";
 
-/**
- * Hook to get the FootballBets contract instance
- *
- * Returns null if contract address is not configured.
- * The contract instance is recreated whenever the wallet address changes.
- * Read-only operations (getBets, getLeaderboard, etc.) work without a connected wallet.
- * Write operations (createBet, resolveBet) require a connected wallet and will fail
- * if the address is null. Defensive validation is added in the mutation hooks.
- */
-export function useCleanCityContract(): FootballBets | null {
+
+export function useCleanCityContract(): CleanCity | null {
   const { address } = useWallet();
   const contractAddress = getContractAddress();
   const studioUrl = getStudioUrl();
@@ -39,7 +31,7 @@ export function useCleanCityContract(): FootballBets | null {
 
     // Contract instance is recreated when address changes to ensure
     // the genlayer-js client is properly configured with the current account
-    return new FootballBets(contractAddress, address, studioUrl);
+    return new CleanCity(contractAddress, address, studioUrl);
   }, [contractAddress, address, studioUrl]);
 
   return contract;
