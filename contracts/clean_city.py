@@ -21,7 +21,7 @@ class Bounty:
     creator: str
     title: str
     description: str
-    location_description: str   
+    location_description: str   # human readable e.g. "Corner of Allen Ave and Awolowo Rd"
     category: str               # "trash" | "graffiti" | "pothole" | "drainage" | "other"
     before_image_url: str   
     reward_gen: i32
@@ -314,6 +314,16 @@ class CleanCity(gl.Contract):
         sub_key = self._claim_key(bounty_id, worker)
         assert sub_key not in self.bounty_submissions, "Already submitted for this bounty"
 
+        token_key = f"{bounty_id}|{worker}"
+        try:
+            stored_token = self.session_tokens[token_key]
+            assert session_token == stored_token, \
+                "Session token does not match — use the token from generate_session_token"
+        except AssertionError:
+            raise
+        except:
+            assert False, "No session token found — call generate_session_token first"
+
         before_url = b.before_image_url
         after_url = after_image_url
         category = b.category
@@ -324,19 +334,20 @@ class CleanCity(gl.Contract):
         worker_notes = notes
 
         def verify_completion() -> str:
-            # Fetch before image
+    
+            before_content = ""
             try:
-                gl.nondet.web.get(before_url)
-                before_status = f"fetched from {before_url}"
+                before_resp = gl.nondet.web.get(before_url)
+                before_content = f"Fetched successfully — {len(before_resp.body)} bytes from {before_url}"
             except:
-                before_status = f"could not fetch from {before_url}"
+                before_content = f"Could not fetch before image from {before_url}"
 
-           
+            after_content = ""
             try:
-                gl.nondet.web.get(after_url)
-                after_status = f"fetched from {after_url}"
+                after_resp = gl.nondet.web.get(after_url)
+                after_content = f"Fetched successfully — {len(after_resp.body)} bytes from {after_url}"
             except:
-                after_status = f"could not fetch from {after_url}"
+                after_content = f"Could not fetch after image from {after_url}"
 
             prompt = f"""You are verifying a public infrastructure cleanup task.
 
@@ -345,15 +356,25 @@ class CleanCity(gl.Contract):
     Location: {location}
     Worker notes: "{worker_notes}"
 
-    Before image: {before_url} ({before_status})
-    After image: {after_url} ({after_status})
-    Session token: {token}
+    Before image URL: {before_url}
+    Before image fetch result: {before_content}
 
-    Decide if the worker completed the task. Be generous — if notes clearly
-    describe completed work, lean toward approved.
+    After image URL: {after_url}
+    After image fetch result: {after_content}
+
+    Session token that must be visible in the after photo: {token}
+
+    Evaluate:
+    1. Were both images successfully fetched?
+    2. Does the after image show meaningful improvement over the before?
+    3. Is the session token {token} visible or mentioned in the submission?
+    4. Does the worker's note describe completed work consistent with the task?
+
+    Be generous — if notes clearly describe completed work and both images
+    were fetched, lean toward approved unless there is a clear reason not to.
     Session token absence alone is not grounds for rejection if work is clearly done.
 
-    Return ONLY valid JSON with these exact keys:
+    Return ONLY valid JSON:
     {{"verdict":"approved","reasoning":"one sentence","confidence":"high","token_visible":true,"improvement_visible":true}}
 
     verdict must be exactly one of: approved, rejected, inconclusive
@@ -405,7 +426,7 @@ class CleanCity(gl.Contract):
 
         raw = gl.eq_principle.prompt_non_comparative(
             verify_completion,
-            task="Verify whether a public infrastructure cleanup task has been completed based on images and worker notes",
+            task="Verify whether a public infrastructure cleanup task has been completed based on fetched image content and worker notes",
             criteria="Return valid JSON with verdict (approved/rejected/inconclusive), reasoning, confidence, token_visible, improvement_visible. Normalize all verdict values to exactly approved, rejected, or inconclusive."
         )
 
@@ -436,9 +457,12 @@ class CleanCity(gl.Contract):
             reasoning = "Consensus evaluation could not be parsed"
             confidence = "low"
 
+        b = self.bounties[bounty_id]
+        assert b.status not in ["completed", "cancelled", "expired"], \
+            "Bounty escrow already settled — cannot process submission"
+
         self.submission_counter += i32(1)
         submission_id = f"sub_{self.submission_counter}"
-        self.submission_ids.append(submission_id)
 
         status = "approved" if verdict == "approved" else \
                 "rejected" if verdict == "rejected" else "pending"
@@ -464,6 +488,8 @@ class CleanCity(gl.Contract):
         self.workers[worker].total_submissions += i32(1)
 
         if verdict == "approved":
+            assert not self.submissions[submission_id].payout_sent, "Payout already sent"
+
             self.bounties[bounty_id].status = "completed"
             self.submissions[submission_id].payout_sent = True
             self.workers[worker].total_approved += i32(1)
@@ -483,8 +509,8 @@ class CleanCity(gl.Contract):
             self.bounties[bounty_id].status = "open"
 
         return submission_id
-    
 
+  
     @gl.public.write
     def appeal_rejection(
         self,
@@ -509,6 +535,13 @@ class CleanCity(gl.Contract):
         bounty_id = sub.bounty_id
         assert bounty_id in self.bounties, "Bounty not found"
         b = self.bounties[bounty_id]
+
+        assert b.status not in ["completed", "cancelled", "expired"], \
+            "Bounty escrow already settled — cannot appeal"
+        assert not sub.payout_sent, "Payout already sent for this submission"
+
+
+        assert int(b.reward_gen) > 0, "No reward remaining in bounty"
 
         before_url = b.before_image_url
         after_url = sub.after_image_url
