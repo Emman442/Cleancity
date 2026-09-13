@@ -116,6 +116,7 @@ class CleanCity(gl.Contract):
         self.session_counter = i32(0)
 
 
+
     def _only_admin(self) -> None:
         assert str(gl.message.sender_address) == self.admin, "Only admin"
 
@@ -136,8 +137,14 @@ class CleanCity(gl.Contract):
         return normalized if normalized in valid else "inconclusive"
 
     def _ensure_worker(self, wallet: str) -> None:
-        if wallet not in self.workers:
-            self.workers[wallet] = WorkerProfile(
+        exists = False
+        try:
+            exists = wallet in self.workers
+        except IndexError:
+            exists = False
+
+        if not exists:
+            new_profile = WorkerProfile(
                 wallet=wallet,
                 total_submissions=i32(0),
                 total_approved=i32(0),
@@ -146,9 +153,8 @@ class CleanCity(gl.Contract):
                 reputation_score=i32(50),
                 first_seen_at=gl.message_raw["datetime"]
             )
-
+            self.workers[wallet] = new_profile
             self.worker_ids.append(wallet)
-
     
 
     @gl.public.write.payable
@@ -229,12 +235,6 @@ class CleanCity(gl.Contract):
 
     @gl.public.write
     def generate_session_token(self, bounty_id: str) -> str:
-        """
-        Worker requests a unique session token before going to the field.
-        They must display this token visibly in their after photo.
-        This prevents reuse of previously taken photos or stock images.
-        The token is tied to the bounty and the worker's wallet.
-        """
         worker = str(gl.message.sender_address)
         assert bounty_id in self.bounties, "Bounty not found"
         b = self.bounties[bounty_id]
@@ -253,9 +253,11 @@ class CleanCity(gl.Contract):
         raw = f"{session_id}{worker}{bounty_id}{now}"
         token = hashlib.sha256(raw.encode()).hexdigest()[:8].upper()
 
-        self.session_tokens[session_id] = token
-        return session_id + ":" + token
+        # FIX: Store under the composite key f"{bounty_id}|{worker}"
+        token_key = f"{bounty_id}|{worker}"
+        self.session_tokens[token_key] = token
 
+        return token
 
 
     @gl.public.write
@@ -311,14 +313,15 @@ class CleanCity(gl.Contract):
         assert len(session_token) > 0, "Session token required"
         assert len(notes) <= 500, "Notes too long"
 
-        sub_key = self._claim_key(bounty_id, worker)
+        sub_key = self._claim_key(bounty_id, worker)        
         assert sub_key not in self.bounty_submissions, "Already submitted for this bounty"
 
         token_key = f"{bounty_id}|{worker}"
+        assert token_key in self.session_tokens, "No session token found — call generate_session_token first"
+
         try:
             stored_token = self.session_tokens[token_key]
-            assert session_token == stored_token, \
-                "Session token does not match — use the token from generate_session_token"
+            assert session_token == stored_token, "Session token does not match — use the token from generate_session_token"
         except AssertionError:
             raise
         except:
@@ -486,6 +489,7 @@ class CleanCity(gl.Contract):
         self.bounty_submissions[sub_key] = submission_id
         self.bounties[bounty_id].submission_id = submission_id
         self.workers[worker].total_submissions += i32(1)
+        self.submission_ids.append(submission_id)
 
         if verdict == "approved":
             assert not self.submissions[submission_id].payout_sent, "Payout already sent"
