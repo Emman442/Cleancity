@@ -23,16 +23,14 @@ class Bounty:
     description: str
     location_description: str   # human readable e.g. "Corner of Allen Ave and Awolowo Rd"
     category: str               # "trash" | "graffiti" | "pothole" | "drainage" | "other"
-    before_image_url: str   
-    reward_gen: i32
+    before_image_url: str
+    reward_gen: i32             # amount EACH worker earns on a verified completion
     deadline: i64
-    status: str                 # "open" | "claimed" | "submitted" | "completed" | "expired" | "cancelled"
-    claimer: str           
-    claimed_at: str
-    submission_id: str
+    status: str                 # "open" | "claimed" | "completed" | "expired" | "cancelled"
     created_at: str
-    max_workers: i32          
-    total_claims: i32
+    max_workers: i32            # max number of workers who can each earn reward_gen
+    total_claims: i32           # how many wallets have claimed a slot
+    total_completed: i32        # how many wallets have been paid out
 
 
 @allow_storage
@@ -41,10 +39,10 @@ class Submission:
     submission_id: str
     bounty_id: str
     worker: str
-    after_image_url: str     
+    after_image_url: str
     session_token: str          # unique token shown in the photo to prevent stock images
     notes: str
-    status: str                 # "pending" | "approved" | "rejected" | "appealed"
+    status: str                 # "approved" | "rejected" | "pending" | "appealed"
     ai_verdict: str             # "approved" | "rejected" | "inconclusive"
     ai_reasoning: str
     ai_confidence: str          # "high" | "medium" | "low"
@@ -83,7 +81,6 @@ class Appeal:
 
 class CleanCity(gl.Contract):
 
-
     bounties: TreeMap[str, Bounty]
     bounty_ids: DynArray[str]
     bounty_counter: i32
@@ -96,12 +93,16 @@ class CleanCity(gl.Contract):
     appeal_counter: i32
 
     workers: TreeMap[str, WorkerProfile]
-    worker_ids: DynArray[str]   
+    worker_ids: DynArray[str]
 
+    # key: "{bounty_id}|{wallet}" -> True if that wallet holds a claimed slot
     bounty_claims: TreeMap[str, bool]
 
+    # key: "{bounty_id}|{wallet}" -> submission_id for that wallet's submission on that bounty
     bounty_submissions: TreeMap[str, str]
 
+    # key: bounty_id -> comma separated list of wallets that have claimed a slot
+    bounty_claimants_csv: TreeMap[str, str]
 
     session_tokens: TreeMap[str, str]
     session_counter: i32
@@ -115,7 +116,9 @@ class CleanCity(gl.Contract):
         self.appeal_counter = i32(0)
         self.session_counter = i32(0)
 
-
+    # ---------------------------------------------------------------------
+    # internal helpers
+    # ---------------------------------------------------------------------
 
     def _only_admin(self) -> None:
         assert str(gl.message.sender_address) == self.admin, "Only admin"
@@ -155,7 +158,38 @@ class CleanCity(gl.Contract):
             )
             self.workers[wallet] = new_profile
             self.worker_ids.append(wallet)
-    
+
+    def _add_claimant(self, bounty_id: str, wallet: str) -> None:
+        existing = ""
+        try:
+            existing = self.bounty_claimants_csv[bounty_id]
+        except Exception:
+            existing = ""
+        if existing == "":
+            self.bounty_claimants_csv[bounty_id] = wallet
+        else:
+            self.bounty_claimants_csv[bounty_id] = existing + "," + wallet
+
+    def _recompute_status(self, bounty_id: str) -> None:
+        """
+        Single source of truth for bounty status. Call this after any claim,
+        payout, or expiry mutation instead of setting status inline.
+        """
+        b = self.bounties[bounty_id]
+
+        if b.status in ["cancelled", "expired"]:
+            return
+
+        if int(b.total_completed) >= int(b.max_workers):
+            self.bounties[bounty_id].status = "completed"
+        elif int(b.total_claims) >= int(b.max_workers):
+            self.bounties[bounty_id].status = "claimed"
+        else:
+            self.bounties[bounty_id].status = "open"
+
+    # ---------------------------------------------------------------------
+    # bounty lifecycle
+    # ---------------------------------------------------------------------
 
     @gl.public.write.payable
     def create_bounty(
@@ -170,9 +204,9 @@ class CleanCity(gl.Contract):
         max_workers: i32
     ) -> str:
         """
-        Anyone can create a bounty — municipality, NGO, citizen, DAO.
-        The before image is the ground truth reference showing the problem.
-        Reward is locked in the contract until a worker completes the job.
+        Anyone can create a bounty. reward_gen is the amount EACH worker earns
+        on a verified completion, so total escrow required is
+        reward_gen * max_workers, locked until workers complete the job.
         """
         creator = str(gl.message.sender_address)
 
@@ -188,8 +222,9 @@ class CleanCity(gl.Contract):
         assert int(duration_seconds) >= 3600, "Duration must be at least 1 hour"
         assert int(max_workers) >= 1, "Must allow at least 1 worker"
 
-        expected_wei = u256(reward_gen) * u256(10**18)
-        assert gl.message.value == expected_wei, "Must deposit exact reward amount in GEN"
+        expected_wei = u256(reward_gen) * u256(max_workers) * u256(10**18)
+        assert gl.message.value == expected_wei, \
+            "Must deposit reward_gen * max_workers in GEN"
 
         self.bounty_counter += i32(1)
         bounty_id = f"bounty_{self.bounty_counter}"
@@ -207,38 +242,90 @@ class CleanCity(gl.Contract):
             reward_gen=reward_gen,
             deadline=i64(now + int(duration_seconds) * 1000),
             status="open",
-            claimer="",
-            claimed_at="",
-            submission_id="",
             created_at=gl.message_raw["datetime"],
             max_workers=max_workers,
-            total_claims=i32(0)
+            total_claims=i32(0),
+            total_completed=i32(0)
         )
 
         self.bounty_ids.append(bounty_id)
+        self.bounty_claimants_csv[bounty_id] = ""
         return bounty_id
 
     @gl.public.write
     def cancel_bounty(self, bounty_id: str) -> None:
+        """
+        Only cancellable while nobody has claimed a slot yet, so a worker who
+        already started can never have the escrow pulled out from under them.
+        """
         creator = str(gl.message.sender_address)
         assert bounty_id in self.bounties, "Bounty not found"
         b = self.bounties[bounty_id]
         assert b.creator == creator or str(gl.message.sender_address) == self.admin, \
             "Only creator or admin can cancel"
         assert b.status == "open", "Can only cancel open bounties"
+        assert int(b.total_claims) == 0, "Cannot cancel once a worker has claimed a slot"
 
         self.bounties[bounty_id].status = "cancelled"
 
-        refund = u256(b.reward_gen) * u256(10**18)
+        refund = u256(b.reward_gen) * u256(b.max_workers) * u256(10**18)
         _Recipient(Address(creator)).emit_transfer(value=refund)
 
+    @gl.public.write
+    def expire_bounty(self, bounty_id: str) -> None:
+        """
+        Anyone can call this after the deadline. Refunds only the slots that
+        were never paid out, since some workers may have already been paid.
+        """
+        assert bounty_id in self.bounties, "Bounty not found"
+        b = self.bounties[bounty_id]
+        assert b.status in ["open", "claimed"], "Bounty not expirable"
+
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        assert now >= int(b.deadline), "Bounty has not expired yet"
+
+        remaining_slots = int(b.max_workers) - int(b.total_completed)
+        self.bounties[bounty_id].status = "expired"
+
+        if remaining_slots > 0:
+            refund = u256(b.reward_gen) * u256(remaining_slots) * u256(10**18)
+            _Recipient(Address(b.creator)).emit_transfer(value=refund)
+
+    # ---------------------------------------------------------------------
+    # claiming and session tokens
+    # ---------------------------------------------------------------------
+
+    @gl.public.write
+    def claim_bounty(self, bounty_id: str) -> None:
+        """
+        Worker claims one of the max_workers slots on a bounty before going
+        to work. Each distinct wallet can claim at most one slot.
+        """
+        worker = str(gl.message.sender_address)
+        self._ensure_worker(worker)
+
+        assert bounty_id in self.bounties, "Bounty not found"
+        b = self.bounties[bounty_id]
+        assert b.status == "open", "Bounty not available for new claims"
+
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        assert now < int(b.deadline), "Bounty has expired"
+
+        claim_key = self._claim_key(bounty_id, worker)
+        assert claim_key not in self.bounty_claims, "Already claimed this bounty"
+        assert int(b.total_claims) < int(b.max_workers), "All worker slots are claimed"
+
+        self.bounty_claims[claim_key] = True
+        self.bounties[bounty_id].total_claims += i32(1)
+        self._add_claimant(bounty_id, worker)
+        self._recompute_status(bounty_id)
 
     @gl.public.write
     def generate_session_token(self, bounty_id: str) -> str:
         worker = str(gl.message.sender_address)
         assert bounty_id in self.bounties, "Bounty not found"
         b = self.bounties[bounty_id]
-        
+
         claim_key = self._claim_key(bounty_id, worker)
         assert claim_key in self.bounty_claims, "Claim this bounty first"
         assert b.status in ["open", "claimed"], "Bounty not available"
@@ -253,42 +340,14 @@ class CleanCity(gl.Contract):
         raw = f"{session_id}{worker}{bounty_id}{now}"
         token = hashlib.sha256(raw.encode()).hexdigest()[:8].upper()
 
-        # FIX: Store under the composite key f"{bounty_id}|{worker}"
         token_key = f"{bounty_id}|{worker}"
         self.session_tokens[token_key] = token
 
         return token
 
-
-    @gl.public.write
-    def claim_bounty(self, bounty_id: str) -> None:
-        """
-        Worker claims a bounty before going to work.
-        This signals intent and prevents multiple workers doing the same job.
-        """
-        worker = str(gl.message.sender_address)
-        self._ensure_worker(worker)
-
-        assert bounty_id in self.bounties, "Bounty not found"
-        b = self.bounties[bounty_id]
-        assert b.status == "open", "Bounty not available"
-
-        now = int(datetime.now(timezone.utc).timestamp() * 1000)
-        assert now < int(b.deadline), "Bounty has expired"
-
-        claim_key = self._claim_key(bounty_id, worker)
-        assert claim_key not in self.bounty_claims, "Already claimed this bounty"
-        assert int(b.total_claims) < int(b.max_workers), "Bounty fully claimed"
-
-        self.bounty_claims[claim_key] = True
-        self.bounties[bounty_id].total_claims += i32(1)
-        self.bounties[bounty_id].claimer = worker
-        self.bounties[bounty_id].claimed_at = gl.message_raw["datetime"]
-
-        if int(b.total_claims) + 1 >= int(b.max_workers):
-            self.bounties[bounty_id].status = "claimed"
-
-
+    # ---------------------------------------------------------------------
+    # submission + AI verification
+    # ---------------------------------------------------------------------
 
     @gl.public.write
     def submit_proof(
@@ -303,7 +362,12 @@ class CleanCity(gl.Contract):
 
         assert bounty_id in self.bounties, "Bounty not found"
         b = self.bounties[bounty_id]
-        assert b.status in ["open", "claimed"], "Bounty not available for submission"
+
+        claim_key = self._claim_key(bounty_id, worker)
+        assert claim_key in self.bounty_claims, "Must claim this bounty before submitting proof"
+
+        assert b.status not in ["cancelled", "expired"], "Bounty is no longer active"
+        assert int(b.total_completed) < int(b.max_workers), "All worker slots already paid out"
 
         now = int(datetime.now(timezone.utc).timestamp() * 1000)
         assert now < int(b.deadline), "Bounty deadline has passed"
@@ -313,19 +377,15 @@ class CleanCity(gl.Contract):
         assert len(session_token) > 0, "Session token required"
         assert len(notes) <= 500, "Notes too long"
 
-        sub_key = self._claim_key(bounty_id, worker)        
+        sub_key = self._claim_key(bounty_id, worker)
         assert sub_key not in self.bounty_submissions, "Already submitted for this bounty"
 
         token_key = f"{bounty_id}|{worker}"
         assert token_key in self.session_tokens, "No session token found — call generate_session_token first"
 
-        try:
-            stored_token = self.session_tokens[token_key]
-            assert session_token == stored_token, "Session token does not match — use the token from generate_session_token"
-        except AssertionError:
-            raise
-        except:
-            assert False, "No session token found — call generate_session_token first"
+        stored_token = self.session_tokens[token_key]
+        assert session_token == stored_token, \
+            "Session token does not match — use the token from generate_session_token"
 
         before_url = b.before_image_url
         after_url = after_image_url
@@ -337,54 +397,42 @@ class CleanCity(gl.Contract):
         worker_notes = notes
 
         def verify_completion() -> str:
-    
-            before_content = ""
+            prompt = f"""You are verifying a public infrastructure cleanup task by visually comparing two photos.
+
+Task: {category} — {task_title}
+Description: {task_description}
+Location: {location}
+Worker notes: "{worker_notes}"
+
+Image 1 is the BEFORE photo showing the original problem.
+Image 2 is the AFTER photo submitted as proof of completion.
+
+Session token that must be visibly written or shown in the AFTER photo: {token}
+
+Look directly at both images and evaluate:
+1. Does the AFTER photo show the same location as the BEFORE photo, with the {category} issue visibly resolved?
+2. Is the session token {token} actually visible somewhere in the AFTER photo?
+3. Is there clear visual evidence of completed work, separate from anything claimed in the notes?
+
+Do not approve based on the notes alone. If the token is not visibly present, or the issue does not look resolved in the photo itself, reject or mark inconclusive even if the notes sound convincing.
+
+Return ONLY valid JSON:
+{{"verdict":"approved","reasoning":"one sentence","confidence":"high","token_visible":true,"improvement_visible":true}}
+
+verdict must be exactly one of: approved, rejected, inconclusive
+confidence must be exactly one of: high, medium, low
+"""
             try:
-                before_resp = gl.nondet.web.get(before_url)
-                before_content = f"Fetched successfully — {len(before_resp.body)} bytes from {before_url}"
-            except:
-                before_content = f"Could not fetch before image from {before_url}"
+                result = gl.nondet.exec_prompt(prompt, images=[before_url, after_url]).strip()
+            except Exception:
+                return json.dumps({
+                    "verdict": "inconclusive",
+                    "reasoning": "Could not load one or both images for visual verification",
+                    "confidence": "low",
+                    "token_visible": False,
+                    "improvement_visible": False
+                }, sort_keys=True, separators=(',', ':'))
 
-            after_content = ""
-            try:
-                after_resp = gl.nondet.web.get(after_url)
-                after_content = f"Fetched successfully — {len(after_resp.body)} bytes from {after_url}"
-            except:
-                after_content = f"Could not fetch after image from {after_url}"
-
-            prompt = f"""You are verifying a public infrastructure cleanup task.
-
-    Task: {category} — {task_title}
-    Description: {task_description}
-    Location: {location}
-    Worker notes: "{worker_notes}"
-
-    Before image URL: {before_url}
-    Before image fetch result: {before_content}
-
-    After image URL: {after_url}
-    After image fetch result: {after_content}
-
-    Session token that must be visible in the after photo: {token}
-
-    Evaluate:
-    1. Were both images successfully fetched?
-    2. Does the after image show meaningful improvement over the before?
-    3. Is the session token {token} visible or mentioned in the submission?
-    4. Does the worker's note describe completed work consistent with the task?
-
-    Be generous — if notes clearly describe completed work and both images
-    were fetched, lean toward approved unless there is a clear reason not to.
-    Session token absence alone is not grounds for rejection if work is clearly done.
-
-    Return ONLY valid JSON:
-    {{"verdict":"approved","reasoning":"one sentence","confidence":"high","token_visible":true,"improvement_visible":true}}
-
-    verdict must be exactly one of: approved, rejected, inconclusive
-    confidence must be exactly one of: high, medium, low
-    token_visible and improvement_visible must be true or false
-    """
-            result = gl.nondet.exec_prompt(prompt).strip()
             cleaned = result.replace("```json", "").replace("```", "").strip()
 
             try:
@@ -398,6 +446,15 @@ class CleanCity(gl.Contract):
                 else:
                     verdict = "inconclusive"
 
+                token_visible = bool(parsed.get("token_visible", False))
+                improvement_visible = bool(parsed.get("improvement_visible", False))
+
+                # An "approved" verdict only stands if the model's own visual
+                # checks actually back it up. This is what stops the verifier
+                # from rubber-stamping notes/metadata alone.
+                if verdict == "approved" and not (token_visible and improvement_visible):
+                    verdict = "inconclusive"
+
                 raw_conf = str(parsed.get("confidence", "medium")).lower().strip()
                 if raw_conf not in ["high", "medium", "low"]:
                     raw_conf = "medium"
@@ -406,31 +463,23 @@ class CleanCity(gl.Contract):
                     "verdict": verdict,
                     "reasoning": str(parsed.get("reasoning", ""))[:300],
                     "confidence": raw_conf,
-                    "token_visible": bool(parsed.get("token_visible", False)),
-                    "improvement_visible": bool(parsed.get("improvement_visible", False))
+                    "token_visible": token_visible,
+                    "improvement_visible": improvement_visible
                 }, sort_keys=True, separators=(',', ':'))
 
-            except:
-                raw_lower = result.lower()
-                if any(w in raw_lower for w in ["approv", "complet", "done", "clean"]):
-                    v = "approved"
-                elif any(w in raw_lower for w in ["reject", "fail", "invalid", "not complet"]):
-                    v = "rejected"
-                else:
-                    v = "inconclusive"
-
+            except Exception:
                 return json.dumps({
-                    "verdict": v,
-                    "reasoning": "AI validators reached consensus",
-                    "confidence": "medium",
+                    "verdict": "inconclusive",
+                    "reasoning": "Response could not be parsed as valid JSON",
+                    "confidence": "low",
                     "token_visible": False,
                     "improvement_visible": False
                 }, sort_keys=True, separators=(',', ':'))
 
         raw = gl.eq_principle.prompt_non_comparative(
             verify_completion,
-            task="Verify whether a public infrastructure cleanup task has been completed based on fetched image content and worker notes",
-            criteria="Return valid JSON with verdict (approved/rejected/inconclusive), reasoning, confidence, token_visible, improvement_visible. Normalize all verdict values to exactly approved, rejected, or inconclusive."
+            task="Verify whether a public infrastructure cleanup task has been completed by visually comparing before and after photos",
+            criteria="Return valid JSON with verdict (approved/rejected/inconclusive), reasoning, confidence, token_visible, improvement_visible. Only approve if the images themselves show the token and the resolved issue, not just the worker's notes."
         )
 
         try:
@@ -455,20 +504,18 @@ class CleanCity(gl.Contract):
             if confidence not in ["high", "medium", "low"]:
                 confidence = "medium"
 
-        except:
+        except Exception:
             verdict = "inconclusive"
             reasoning = "Consensus evaluation could not be parsed"
             confidence = "low"
 
         b = self.bounties[bounty_id]
-        assert b.status not in ["completed", "cancelled", "expired"], \
-            "Bounty escrow already settled — cannot process submission"
 
         self.submission_counter += i32(1)
         submission_id = f"sub_{self.submission_counter}"
 
         status = "approved" if verdict == "approved" else \
-                "rejected" if verdict == "rejected" else "pending"
+                 "rejected" if verdict == "rejected" else "pending"
 
         self.submissions[submission_id] = Submission(
             submission_id=submission_id,
@@ -487,15 +534,15 @@ class CleanCity(gl.Contract):
         )
 
         self.bounty_submissions[sub_key] = submission_id
-        self.bounties[bounty_id].submission_id = submission_id
         self.workers[worker].total_submissions += i32(1)
         self.submission_ids.append(submission_id)
 
         if verdict == "approved":
-            assert not self.submissions[submission_id].payout_sent, "Payout already sent"
+            assert int(b.total_completed) < int(b.max_workers), \
+                "All worker slots already paid out"
 
-            self.bounties[bounty_id].status = "completed"
             self.submissions[submission_id].payout_sent = True
+            self.bounties[bounty_id].total_completed += i32(1)
             self.workers[worker].total_approved += i32(1)
             self.workers[worker].total_earned_gen += b.reward_gen
             self.workers[worker].reputation_score += i32(10)
@@ -504,17 +551,17 @@ class CleanCity(gl.Contract):
             _Recipient(Address(worker)).emit_transfer(value=payout)
 
         elif verdict == "rejected":
-            self.bounties[bounty_id].status = "open"
             self.workers[worker].total_rejected += i32(1)
             if int(self.workers[worker].reputation_score) > 5:
                 self.workers[worker].reputation_score -= i32(5)
 
-        else:
-            self.bounties[bounty_id].status = "open"
-
+        self._recompute_status(bounty_id)
         return submission_id
 
-  
+    # ---------------------------------------------------------------------
+    # appeals
+    # ---------------------------------------------------------------------
+
     @gl.public.write
     def appeal_rejection(
         self,
@@ -523,8 +570,8 @@ class CleanCity(gl.Contract):
         additional_image_url: str
     ) -> str:
         """
-        Worker can appeal a rejected or inconclusive verdict once.
-        They can provide additional context and an extra image.
+        Worker can appeal a rejected or inconclusive verdict once, with
+        additional context and an optional extra image.
         """
         worker = str(gl.message.sender_address)
         assert submission_id in self.submissions, "Submission not found"
@@ -533,19 +580,16 @@ class CleanCity(gl.Contract):
         assert sub.worker == worker, "Not your submission"
         assert sub.ai_verdict in ["rejected", "inconclusive"], \
             "Can only appeal rejected or inconclusive submissions"
-        assert sub.status in ["rejected", "inconclusive"], \
+        assert sub.status in ["rejected", "pending"], \
             "Submission not eligible for appeal"
+        assert not sub.payout_sent, "Payout already sent for this submission"
 
         bounty_id = sub.bounty_id
         assert bounty_id in self.bounties, "Bounty not found"
         b = self.bounties[bounty_id]
 
-        assert b.status not in ["completed", "cancelled", "expired"], \
-            "Bounty escrow already settled — cannot appeal"
-        assert not sub.payout_sent, "Payout already sent for this submission"
-
-
-        assert int(b.reward_gen) > 0, "No reward remaining in bounty"
+        assert b.status not in ["cancelled", "expired"], "Bounty is no longer active"
+        assert int(b.total_completed) < int(b.max_workers), "All worker slots already paid out"
 
         before_url = b.before_image_url
         after_url = sub.after_image_url
@@ -567,38 +611,45 @@ class CleanCity(gl.Contract):
 
             prompt = f"""You are reviewing an appeal of a rejected or inconclusive infrastructure task submission.
 
-    Task Category: {category}
-    Task Title: "{task_title}"
-    Location: {location}
+Task Category: {category}
+Task Title: "{task_title}"
+Location: {location}
 
-    You are given images in this order.
-    Image 1 is the BEFORE image.
-    Image 2 is the original AFTER image that was rejected or marked inconclusive.
-    {"Image 3 is an ADDITIONAL image provided as new evidence for this appeal." if has_extra else "No additional evidence image was provided."}
+You are given images in this order.
+Image 1 is the BEFORE image.
+Image 2 is the original AFTER image that was rejected or marked inconclusive.
+{"Image 3 is an ADDITIONAL image provided as new evidence for this appeal." if has_extra else "No additional evidence image was provided."}
 
-    Original evaluation reasoning: {original_reasoning}
+Original evaluation reasoning: {original_reasoning}
 
-    Worker's appeal context:
-    "{context}"
+Worker's appeal context:
+"{context}"
 
-    Session token that should be visible: {token}
+Session token that should be visible: {token}
 
-    Re-evaluate this submission with fresh eyes, considering:
-    1. The worker's appeal explanation
-    2. Any additional evidence provided
-    3. Whether the original evaluation was too strict or the images were unclear the first time
+Re-evaluate this submission with fresh eyes, looking directly at the images, considering:
+1. The worker's appeal explanation
+2. Any additional evidence provided
+3. Whether the original evaluation was too strict or the images were unclear the first time
 
-    Give the worker reasonable benefit of the doubt. If there is genuine evidence
-    of task completion, approve the appeal.
+Only approve if the images themselves show genuine evidence of task completion and the session token.
 
-    Return ONLY valid JSON:
-    {{
-    "verdict": "approved" | "rejected",
-    "reasoning": "2-3 sentences explaining your appeal decision",
-    "confidence": "high" | "medium" | "low"
-    }}
-    """
-            result = gl.nondet.exec_prompt(prompt, images=images).strip()
+Return ONLY valid JSON:
+{{
+"verdict": "approved" | "rejected",
+"reasoning": "2-3 sentences explaining your appeal decision",
+"confidence": "high" | "medium" | "low"
+}}
+"""
+            try:
+                result = gl.nondet.exec_prompt(prompt, images=images).strip()
+            except Exception:
+                return json.dumps({
+                    "verdict": "rejected",
+                    "reasoning": "Could not load images for appeal review",
+                    "confidence": "low"
+                }, sort_keys=True, separators=(',', ':'))
+
             cleaned = result.replace("```json", "").replace("```", "").strip()
             try:
                 parsed = json.loads(cleaned)
@@ -608,7 +659,7 @@ class CleanCity(gl.Contract):
                     "reasoning": str(parsed.get("reasoning", "")),
                     "confidence": str(parsed.get("confidence", "medium"))
                 }, sort_keys=True, separators=(',', ':'))
-            except:
+            except Exception:
                 return json.dumps({
                     "verdict": "rejected",
                     "reasoning": "Could not evaluate appeal",
@@ -617,8 +668,8 @@ class CleanCity(gl.Contract):
 
         raw = gl.eq_principle.prompt_non_comparative(
             evaluate_appeal,
-            task="Review an appeal of a rejected or inconclusive infrastructure task submission",
-            criteria="Give the worker reasonable benefit of the doubt. Approve if there is genuine evidence of task completion. Reject only if the task is clearly not completed."
+            task="Review an appeal of a rejected or inconclusive infrastructure task submission by visually comparing images",
+            criteria="Approve only if the images themselves show genuine evidence of task completion and the session token. Reject if the task is clearly not completed."
         )
 
         try:
@@ -626,7 +677,7 @@ class CleanCity(gl.Contract):
             verdict = self._normalize_verdict(data.get("verdict", "rejected"), ["approved", "rejected"])
             reasoning = data.get("reasoning", "")
             confidence = data.get("confidence", "medium")
-        except:
+        except Exception:
             verdict = "rejected"
             reasoning = "Appeal evaluation could not be parsed"
             confidence = "low"
@@ -653,18 +704,24 @@ class CleanCity(gl.Contract):
         self.submissions[submission_id].status = "approved" if verdict == "approved" else "rejected"
 
         if verdict == "approved":
-            self.bounties[bounty_id].status = "completed"
+            assert int(b.total_completed) < int(b.max_workers), \
+                "All worker slots already paid out"
+
             self.submissions[submission_id].payout_sent = True
+            self.bounties[bounty_id].total_completed += i32(1)
             self.workers[worker].total_approved += i32(1)
             self.workers[worker].total_earned_gen += b.reward_gen
             self.workers[worker].reputation_score += i32(5)
 
             payout = u256(b.reward_gen) * u256(10**18)
             _Recipient(Address(worker)).emit_transfer(value=payout)
-        else:
-            self.bounties[bounty_id].status = "open"
 
+        self._recompute_status(bounty_id)
         return appeal_id
+
+    # ---------------------------------------------------------------------
+    # admin override
+    # ---------------------------------------------------------------------
 
     @gl.public.write
     def admin_approve_submission(
@@ -681,36 +738,25 @@ class CleanCity(gl.Contract):
         b = self.bounties[bounty_id]
         worker = sub.worker
 
+        assert int(b.total_completed) < int(b.max_workers), \
+            "All worker slots already paid out"
+
         self.submissions[submission_id].status = "approved"
         self.submissions[submission_id].ai_reasoning = f"Admin approved: {reason}"
         self.submissions[submission_id].payout_sent = True
-        self.bounties[bounty_id].status = "completed"
 
+        self.bounties[bounty_id].total_completed += i32(1)
         self.workers[worker].total_approved += i32(1)
         self.workers[worker].total_earned_gen += b.reward_gen
 
         payout = u256(b.reward_gen) * u256(10**18)
         _Recipient(Address(worker)).emit_transfer(value=payout)
 
+        self._recompute_status(bounty_id)
 
-    @gl.public.write
-    def expire_bounty(self, bounty_id: str) -> None:
-        """
-        Anyone can call this after the deadline to expire the bounty
-        and return funds to the creator.
-        """
-        assert bounty_id in self.bounties, "Bounty not found"
-        b = self.bounties[bounty_id]
-        assert b.status in ["open", "claimed"], "Bounty not expirable"
-
-        now = int(datetime.now(timezone.utc).timestamp() * 1000)
-        assert now >= int(b.deadline), "Bounty has not expired yet"
-
-        self.bounties[bounty_id].status = "expired"
-
-        refund = u256(b.reward_gen) * u256(10**18)
-        _Recipient(Address(b.creator)).emit_transfer(value=refund)
-
+    # ---------------------------------------------------------------------
+    # views
+    # ---------------------------------------------------------------------
 
     @gl.public.view
     def get_bounty(self, bounty_id: str) -> Bounty:
@@ -742,6 +788,14 @@ class CleanCity(gl.Contract):
             if b.category == category:
                 result.append(gl.storage.copy_to_memory(b))
         return result
+
+    @gl.public.view
+    def get_bounty_claimants(self, bounty_id: str) -> list[str]:
+        assert bounty_id in self.bounty_claimants_csv, "Bounty not found"
+        csv = self.bounty_claimants_csv[bounty_id]
+        if csv == "":
+            return []
+        return csv.split(",")
 
     @gl.public.view
     def get_submission(self, submission_id: str) -> Submission:
@@ -780,6 +834,7 @@ class CleanCity(gl.Contract):
     @gl.public.view
     def get_total_submissions(self) -> i32:
         return self.submission_counter
+
     @gl.public.view
     def get_leaderboard(self) -> list[WorkerProfile]:
         """
@@ -791,7 +846,6 @@ class CleanCity(gl.Contract):
             result.append(gl.storage.copy_to_memory(self.workers[wallet]))
         return result
 
-
     @gl.public.view
     def get_top_workers(self, limit: i32) -> list[WorkerProfile]:
         """
@@ -802,7 +856,6 @@ class CleanCity(gl.Contract):
         for wallet in self.worker_ids:
             profiles.append(gl.storage.copy_to_memory(self.workers[wallet]))
 
-       
         n = len(profiles)
         for i in range(n):
             for j in range(0, n - i - 1):
