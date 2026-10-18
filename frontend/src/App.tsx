@@ -8,9 +8,8 @@ import DetailPage from "./pages/DetailPage";
 import PostPage from "./pages/PostPage";
 import ActivityPage from "./pages/ActivityPage";
 import ProfilePage from "./pages/ProfilePage";
-import { Bounty } from "./lib/contracts/types";
-import { useBounties, useClaimBounty, useCreateBounty } from "./lib/hooks/useCleanCity";
-import { useWallet, WalletProvider } from "./lib/genlayer/wallet";
+import { useBounties, useClaimBounty, useCreateBounty, useWorkerClaimedBountyIds } from "./lib/hooks/useCleanCity";
+import { useWallet } from "./lib/genlayer/wallet";
 
 export default function App() {
   // Navigation Routing States
@@ -20,6 +19,7 @@ export default function App() {
   const { isPending: isCreatingBounty, mutate: createBounty } = useCreateBounty()
   // Data States
   const { isPending: loadingBounties, data: bounties } = useBounties()
+  const { data: claimedBountyIds = [] } = useWorkerClaimedBountyIds(wallet)
 
   // Global Toast State
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -96,6 +96,7 @@ export default function App() {
           bounties={bounties || []}
           loading={loadingBounties}
           wallet={wallet}
+          claimedBountyIds={claimedBountyIds}
           onClaim={handleClaimBounty}
           navigate={handleNavigate}
           onConnectWallet={() => connectWallet()}
@@ -111,6 +112,7 @@ export default function App() {
           bountyId={id}
           bounties={bounties || []}
           wallet={wallet}
+          claimedBountyIds={claimedBountyIds}
           onBack={() => handleNavigate("#/bounties")}
           onClaim={handleClaimBounty}
           onConnectWallet={() => connectWallet()}
@@ -139,6 +141,7 @@ export default function App() {
         <ActivityPage
           wallet={wallet}
           bounties={bounties || []}
+          claimedBountyIds={claimedBountyIds}
           loadingBounties={loadingBounties}
           navigate={handleNavigate}
         />

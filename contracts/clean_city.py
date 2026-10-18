@@ -22,7 +22,7 @@ class Bounty:
     title: str
     description: str
     location_description: str   # human readable e.g. "Corner of Allen Ave and Awolowo Rd"
-    category: str               # "trash" | "graffiti" | "pothole" | "drainage" | "other"
+    category: str               # "trash" | "graffiti" | "pothole" | "drainage" | "vandalism" | "flooding" | "lighting" | "other"
     before_image_url: str
     reward_gen: i32             # amount EACH worker earns on a verified completion
     deadline: i64
@@ -808,6 +808,14 @@ Return ONLY valid JSON:
         if key in self.bounty_submissions:
             return self.bounty_submissions[key]
         return ""
+
+    @gl.public.view
+    def get_worker_claimed_bounty_ids(self, wallet: str) -> list[str]:
+        result = []
+        for bounty_id in self.bounty_ids:
+            if self._claim_key(bounty_id, wallet) in self.bounty_claims:
+                result.append(bounty_id)
+        return result
 
     @gl.public.view
     def get_worker_profile(self, wallet: str) -> WorkerProfile:

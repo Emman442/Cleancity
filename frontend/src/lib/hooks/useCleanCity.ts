@@ -71,6 +71,23 @@ export function useBounties() {
   });
 }
 
+export function useWorkerClaimedBountyIds(wallet: string | null) {
+  const contract = useCleanCityContract();
+
+  return useQuery<string[], Error>({
+    queryKey: ["workerClaimedBountyIds", wallet],
+    queryFn: () => {
+      if (!contract || !wallet) {
+        throw new Error("Contract or wallet not initialized");
+      }
+      return contract.getWorkerClaimedBountyIds(wallet);
+    },
+    refetchOnWindowFocus: true,
+    staleTime: 2000,
+    enabled: !!contract && !!wallet,
+  });
+}
+
 
 export function useBounty(bountyId: string) {
   const contract = useCleanCityContract();
@@ -146,7 +163,13 @@ export function useClaimBounty() {
 
     onSuccess: async (_, variables) => {
       await queryClient.invalidateQueries({
+        queryKey: ["bounties"],
+      });
+      await queryClient.invalidateQueries({
         queryKey: ["bounty", variables.bounty_id],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ["workerClaimedBountyIds"],
       });
     },
     onError: async (error: any) => {
@@ -242,6 +265,9 @@ export function useSubmitProof() {
       await queryClient.invalidateQueries({
         queryKey: ["bounty", variables.bounty_id],
       });
+      await queryClient.invalidateQueries({
+        queryKey: ["worker_submissions"],
+      });
     },
     onError: async (error: any) => {
       console.error("Error submitting proof:", error);
@@ -279,6 +305,9 @@ export function useAppealRejection() {
       });
       await queryClient.invalidateQueries({
         queryKey: ["bounty", variables.submission_id],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ["worker_submissions"],
       });
     },
     onError: async (error: any) => {

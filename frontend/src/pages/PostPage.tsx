@@ -5,6 +5,7 @@ import {
   Hammer,
   Droplets,
   Flame,
+  Lightbulb,
 
   HelpCircle,
   Camera,
@@ -52,6 +53,8 @@ export default function PostPage({
     { value: "pothole", label: "POTHOLE", icon: Hammer },
     { value: "drainage", label: "DRAINAGE", icon: Droplets },
     { value: "vandalism", label: "VANDALISM", icon: Flame },
+    { value: "flooding", label: "FLOODING", icon: Droplets },
+    { value: "lighting", label: "LIGHTING", icon: Lightbulb },
     { value: "other", label: "OTHER", icon: HelpCircle },
   ];
 

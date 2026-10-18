@@ -4,9 +4,10 @@ import { Bounty, BountyStatus, Category } from "../lib/contracts/types";
 
 interface BoardPageProps {
   bounties: Bounty[];
+  claimedBountyIds: string[];
   loading: boolean;
   wallet: string | null;
-  onClaim: (id: string) => Promise<void>;
+  onClaim: (id: string) => void;
   navigate: (path: string) => void;
   onConnectWallet: () => void;
   isClaimingBounty: boolean;
@@ -14,6 +15,7 @@ interface BoardPageProps {
 
 export default function BoardPage({
   bounties,
+  claimedBountyIds,
   loading,
   wallet,
   onClaim,
@@ -35,10 +37,19 @@ export default function BoardPage({
     "pothole",
     "drainage",
     "vandalism",
+    "flooding",
+    "lighting",
     "other",
   ];
 
-  const statuses: (BountyStatus | "all")[] = ["all", "open", "claimed", "completed"];
+  const statuses: (BountyStatus | "all")[] = [
+    "all",
+    "open",
+    "claimed",
+    "completed",
+    "expired",
+    "cancelled",
+  ];
 
   // Filtering
   const filteredBounties = bounties.filter((b) => {
@@ -235,7 +246,7 @@ export default function BoardPage({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {sortedBounties.map((b) => {
-            const isClaimedByMe = wallet && b.claimer?.includes(wallet.toLowerCase());
+            const isClaimedByMe = claimedBountyIds.includes(b.bounty_id);
             const deadlineInfo = formatDeadline(b.deadline.toString());
 
 

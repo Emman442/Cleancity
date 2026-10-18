@@ -1,12 +1,13 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { ArrowRight, Clock, Award, CheckCircle2, XCircle, AlertCircle, Eye } from "lucide-react";
-import { Bounty, Submission, WorkerProfile } from "../lib/contracts/types";
+import { Bounty } from "../lib/contracts/types";
 import { useWorkerProfile, useWorkerSubmissions,} from "../lib/hooks/useCleanCity";
 import {getAddress} from "viem";
 
 interface ActivityPageProps {
   wallet: string;
   bounties: Bounty[];
+  claimedBountyIds: string[];
   loadingBounties: boolean;
   navigate: (path: string) => void;
 }
@@ -14,6 +15,7 @@ interface ActivityPageProps {
 export default function ActivityPage({
   wallet,
   bounties,
+  claimedBountyIds,
   loadingBounties,
   navigate,
 }: ActivityPageProps) {
@@ -44,25 +46,24 @@ export default function ActivityPage({
 
   // Active claims (Bounties claimed by worker, but status is not COMPLETED)
   const activeClaims = bounties.filter(
-    (b) => b.claimer?.includes(walletLower) && b.status !== "completed"
+    (b) => claimedBountyIds.includes(b.bounty_id) && ["open", "claimed"].includes(b.status)
   );
 
   // CREATOR STATS & BOUNTIES
   const myCreatedBounties = bounties.filter((b) => b.creator.toLowerCase() === walletLower);
   const totalPosted = myCreatedBounties.length;
   const totalPaidOut = myCreatedBounties
-    .filter((b) => b.status === "completed")
-    .reduce((sum, b) => sum + b.reward_gen, 0);
+    .reduce((sum, b) => sum + b.reward_gen * b.total_completed, 0);
   const activeBounties = myCreatedBounties.filter((b) => b.status === "open" || b.status === "claimed");
   const completedBounties = myCreatedBounties.filter((b) => b.status === "completed");
 
   const getVerdictBadge = (status: string) => {
     switch (status) {
-      case "APPROVED":
+      case "approved":
         return <span className="text-[#a3e635] bg-[#a3e635]/10 border border-[#a3e635] px-2 py-0.5 text-[9px] font-mono">APPROVED</span>;
-      case "REJECTED":
+      case "rejected":
         return <span className="text-[#ef4444] bg-[#ef4444]/10 border border-[#ef4444] px-2 py-0.5 text-[9px] font-mono">REJECTED</span>;
-      case "INCONCLUSIVE":
+      case "inconclusive":
         return <span className="text-[#f59e0b] bg-[#f59e0b]/10 border border-[#f59e0b] px-2 py-0.5 text-[9px] font-mono">INCONCLUSIVE</span>;
       default:
         return <span className="text-[#737373] bg-[#111111] border border-[#1f1f1f] px-2 py-0.5 text-[9px] font-mono">PENDING</span>;
@@ -249,9 +250,11 @@ export default function ActivityPage({
                           {sub.bounty_id ? bounties.find((b) => b.bounty_id === sub.bounty_id)?.title || "Unknown Bounty" : "Unknown Bounty"}
                         </td>
                         <td className="p-4 text-[#a3e635] font-bold">{sub.session_token}</td>
-                        <td className="p-4">{getVerdictBadge(sub.status)}</td>
+                        <td className="p-4">{getVerdictBadge(sub.ai_verdict)}</td>
                         <td className="p-4 text-white">
-                          {sub.status === "approved" ? `+${profile?.total_earned_gen ? "" : ""} GEN` : "—"}
+                              {sub.payout_sent
+                                ? `+${bounties.find((b) => b.bounty_id === sub.bounty_id)?.reward_gen ?? 0} GEN`
+                                : "—"}
                         </td>
                         <td className="p-4 text-[#737373] text-right">
                           {new Date(sub.submitted_at).toLocaleDateString()}

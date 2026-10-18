@@ -1,5 +1,5 @@
-export type BountyStatus = "open" | "claimed" | "submitted" | "completed" | "expired" | "cancelled"
-export type Category = "trash" | "graffiti" | "pothole" | "drainage" | "vandalism" | "other"
+export type BountyStatus = "open" | "claimed" | "completed" | "expired" | "cancelled"
+export type Category = "trash" | "graffiti" | "pothole" | "drainage" | "vandalism" | "flooding" | "lighting" | "other"
 export type Verdict = "approved" | "rejected" | "inconclusive"
 
 export interface Bounty {
@@ -13,12 +13,10 @@ export interface Bounty {
   reward_gen: number
   deadline: number
   status: BountyStatus
-  claimer: string
-  claimed_at: string
-  submission_id: string
   created_at: string
   max_workers: number
   total_claims: number
+  total_completed: number
 }
 
 

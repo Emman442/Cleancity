@@ -38,7 +38,7 @@ Municipalities, NGOs, DAOs, or individual citizens can create bounties for issue
 ## How It Works
 
 1. **Create Bounty**  
-   Anyone deposits GEN and creates a bounty with a title, description, location, category, before-image URL, reward amount, duration, and max number of workers.
+   Anyone creates a bounty with a title, description, location, category, before-image URL, per-worker reward, duration, and max number of workers. The creator deposits `reward_gen × max_workers` GEN; the contract enforces the exact escrow amount.
 
 2. **Claim Bounty**  
    A worker claims the bounty (limited by `max_workers`).
@@ -56,7 +56,7 @@ Municipalities, NGOs, DAOs, or individual citizens can create bounties for issue
    GenLayer AI compares the before and after images, checks for visible improvement, and returns a verdict (`approved`, `rejected`, or `inconclusive`) with confidence and reasoning.
 
 6. **Payout or Appeal**  
-   - If approved → Worker is paid automatically and reputation increases  
+   - If approved → Worker receives `reward_gen` automatically and reputation increases
    - If rejected/inconclusive → Worker can appeal once with additional context and image
 
 7. **Expiry**  
@@ -85,6 +85,9 @@ Municipalities, NGOs, DAOs, or individual citizens can create bounties for issue
 | `get_open_bounties()` | List all currently open bounties |
 | `get_all_bounties()` | List every bounty |
 | `get_submission(submission_id)` | Get submission details |
+| `get_worker_submission(bounty_id, wallet)` | Get a worker's submission ID for a bounty |
+| `get_worker_claimed_bounty_ids(wallet)` | Get bounty IDs claimed by a worker |
+| `get_bounty_claimants(bounty_id)` | Get the wallets that claimed a bounty |
 | `get_worker_profile(wallet)` | Get worker stats and reputation |
 | `get_leaderboard()` | Get all worker profiles |
 | `get_top_workers(limit)` | Get top workers sorted by reputation |
