@@ -100,6 +100,22 @@ class CleanCity {
     }
   }
 
+  async hasClaimed(bountyId: string, wallet: string): Promise<Boolean> {
+    try {
+      const has_claimed = await this.client.readContract({
+        address: this.contractAddress,
+        functionName: "has_claimed",
+        args: [bountyId, wallet]
+      });
+
+
+      return Boolean(has_claimed);
+    } catch (error) {
+      console.error("Error: ", error);
+      throw new Error("Failed to check");
+    }
+  }
+
   async getWorkerClaimedBountyIds(workerId: string): Promise<string[]> {
     try {
       const bountyIds = await this.client.readContract({

@@ -106,6 +106,23 @@ export function useBounty(bountyId: string) {
   });
 }
 
+export function useHasClaimed(bountyId: string, wallet: string | null) {
+  const contract = useCleanCityContract();
+
+  return useQuery<Boolean, Error>({
+    queryKey: ["hasClaimed", bountyId, wallet],
+    queryFn: () => {
+      if (!contract || !wallet) {
+        return Promise.resolve(false);
+      }
+      return contract.hasClaimed(bountyId, wallet);
+    },
+    refetchOnWindowFocus: true,
+    enabled: !!bountyId && !!wallet && !!contract,
+    staleTime: 2000,
+  });
+}
+
 export function useWorkerProfile(workerId: string) {
   const contract = useCleanCityContract();
 

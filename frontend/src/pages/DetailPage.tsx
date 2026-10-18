@@ -11,10 +11,10 @@ import {
   Check,
 } from "lucide-react";
 import { Bounty, Category, Verdict } from "../lib/contracts/types";
-import { useSubmitProof, useGenerateSessionToken, useAppealRejection } from "../lib/hooks/useCleanCity";
+import { useSubmitProof, useGenerateSessionToken, useAppealRejection, useHasClaimed } from "../lib/hooks/useCleanCity";
 import { extractSessionToken } from "../lib/utils/generateSessionToken";
 import { uploadImage } from "../lib/utils/uploadImage";
-
+import { getAddress } from 'viem';
 import { useCleanCityContract } from "../lib/hooks/useCleanCity";
 import { extractSubmissionId } from "../lib/utils/extractSubmissionId";
 
@@ -40,7 +40,7 @@ export default function DetailPage({
   showToast
 }: DetailPageProps) {
   const bounty = bounties.find((b) => b.bounty_id === bountyId);
-
+  console.log(bounty)
   const contract = useCleanCityContract();
   const [token, setToken] = useState<string>("");
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -56,6 +56,10 @@ export default function DetailPage({
   const [appealContext, setAppealContext] = useState("");
   const [appealImagePreview, setAppealImagePreview] = useState<string | null>(null);
   const appealFileInputRef = useRef<HTMLInputElement>(null);
+  const {data: isClaimedByMe} = useHasClaimed(bountyId, getAddress(wallet!))
+  console.log(isClaimedByMe)
+  console.log(wallet)
+
 
 
   const [statusMsgIndex, setStatusMsgIndex] = useState(0);
@@ -71,7 +75,7 @@ export default function DetailPage({
   const { isPending: isSubmittingProof, mutate: submitProof } = useSubmitProof();
   const { isPending: isGeneratingSessionToken, mutate: generateToken } = useGenerateSessionToken()
 
-  const isClaimedByMe = claimedBountyIds.includes(bountyId);
+
 
   useEffect(() => {
     if (wallet && bounty) {

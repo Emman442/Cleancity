@@ -80,15 +80,12 @@ export default function LandingPage({ bounties, loading, navigate }: LandingPage
       BEFORE
     </span>
 
-    {bounties.length > 0 && bounties[5]?.before_image_url ? (
       <img
-        src={bounties[5].before_image_url}
+        src="https://res.cloudinary.com/dighewixb/image/upload/v1789297086/cleancity/hlxvnb3j8czftzhw9uln.jpg"
         alt="Before"
         className="w-full h-full object-cover grayscale brightness-90"
       />
-    ) : (
-      <div className="w-12 h-1 bg-[#ef4444]" />
-    )}
+    
   </div>
 
   {/* Splitter Line */}

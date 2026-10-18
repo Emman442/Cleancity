@@ -4,6 +4,36 @@ from genlayer import *
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import hashlib
+
+
+# ---------------------------------------------------------------------
+# module-level helpers (accessible inside non-det closures)
+# ---------------------------------------------------------------------
+
+def _normalize_verdict_value(v: str, valid: list) -> str:
+    v = str(v).strip().lower()
+    synonyms = {
+        "reject": "rejected",
+        "rejected": "rejected",
+        "approve": "approved",
+        "approved": "approved",
+        "inconclusive": "inconclusive",
+        "unclear": "inconclusive"
+    }
+    normalized = synonyms.get(v, "inconclusive")
+    return normalized if normalized in valid else "inconclusive"
+
+
+def _fetch_image(url: str) -> bytes:
+    """Download an image so it can be handed to exec_prompt as bytes."""
+    response = gl.nondet.web.get(url)
+    if response.status != 200:
+        raise Exception(f"Image fetch failed with status {response.status}")
+    body = response.body
+    if not body:
+        raise Exception("Image fetch returned an empty body")
+    return body
 
 
 @gl.evm.contract_interface
@@ -22,7 +52,7 @@ class Bounty:
     title: str
     description: str
     location_description: str   # human readable e.g. "Corner of Allen Ave and Awolowo Rd"
-    category: str               # "trash" | "graffiti" | "pothole" | "drainage" | "vandalism" | "flooding" | "lighting" | "other"
+    category: str               # "trash" | "graffiti" | "pothole" | "drainage" | "other"
     before_image_url: str
     reward_gen: i32             # amount EACH worker earns on a verified completion
     deadline: i64
@@ -126,19 +156,6 @@ class CleanCity(gl.Contract):
     def _claim_key(self, bounty_id: str, wallet: str) -> str:
         return bounty_id + "|" + wallet
 
-    def _normalize_verdict(self, v: str, valid: list) -> str:
-        v = v.strip().lower()
-        synonyms = {
-            "reject": "rejected",
-            "rejected": "rejected",
-            "approve": "approved",
-            "approved": "approved",
-            "inconclusive": "inconclusive",
-            "unclear": "inconclusive"
-        }
-        normalized = synonyms.get(v, "inconclusive")
-        return normalized if normalized in valid else "inconclusive"
-
     def _ensure_worker(self, wallet: str) -> None:
         exists = False
         try:
@@ -158,6 +175,9 @@ class CleanCity(gl.Contract):
             )
             self.workers[wallet] = new_profile
             self.worker_ids.append(wallet)
+            
+    def _normalize_verdict(self, v: str, valid: list) -> str:
+        return _normalize_verdict_value(v, valid)
 
     def _add_claimant(self, bounty_id: str, wallet: str) -> None:
         existing = ""
@@ -336,7 +356,6 @@ class CleanCity(gl.Contract):
         self.session_counter += i32(1)
         session_id = f"session_{self.session_counter}"
 
-        import hashlib
         raw = f"{session_id}{worker}{bounty_id}{now}"
         token = hashlib.sha256(raw.encode()).hexdigest()[:8].upper()
 
@@ -381,12 +400,14 @@ class CleanCity(gl.Contract):
         assert sub_key not in self.bounty_submissions, "Already submitted for this bounty"
 
         token_key = f"{bounty_id}|{worker}"
-        assert token_key in self.session_tokens, "No session token found — call generate_session_token first"
+        assert token_key in self.session_tokens, "No session token found - call generate_session_token first"
 
         stored_token = self.session_tokens[token_key]
         assert session_token == stored_token, \
-            "Session token does not match — use the token from generate_session_token"
+            "Session token does not match - use the token from generate_session_token"
 
+        # Copy everything the nondet block needs into plain locals so the
+        # closure never touches contract storage.
         before_url = b.before_image_url
         after_url = after_image_url
         category = b.category
@@ -399,7 +420,7 @@ class CleanCity(gl.Contract):
         def verify_completion() -> str:
             prompt = f"""You are verifying a public infrastructure cleanup task by visually comparing two photos.
 
-Task: {category} — {task_title}
+Task: {category} - {task_title}
 Description: {task_description}
 Location: {location}
 Worker notes: "{worker_notes}"
@@ -423,7 +444,11 @@ verdict must be exactly one of: approved, rejected, inconclusive
 confidence must be exactly one of: high, medium, low
 """
             try:
-                result = gl.nondet.exec_prompt(prompt, images=[before_url, after_url]).strip()
+                before_img = _fetch_image(before_url)
+                after_img = _fetch_image(after_url)
+                result = gl.nondet.exec_prompt(
+                    prompt, images=[before_img, after_img]
+                ).strip()
             except Exception:
                 return json.dumps({
                     "verdict": "inconclusive",
@@ -449,9 +474,7 @@ confidence must be exactly one of: high, medium, low
                 token_visible = bool(parsed.get("token_visible", False))
                 improvement_visible = bool(parsed.get("improvement_visible", False))
 
-                # An "approved" verdict only stands if the model's own visual
-                # checks actually back it up. This is what stops the verifier
-                # from rubber-stamping notes/metadata alone.
+                # An approval only stands if the model's own visual checks back it up.
                 if verdict == "approved" and not (token_visible and improvement_visible):
                     verdict = "inconclusive"
 
@@ -570,7 +593,7 @@ confidence must be exactly one of: high, medium, low
         additional_image_url: str
     ) -> str:
         """
-        Worker can appeal a rejected or inconclusive verdict once, with
+        Worker can appeal a rejected or inconclusive verdict, with
         additional context and an optional extra image.
         """
         worker = str(gl.message.sender_address)
@@ -591,6 +614,7 @@ confidence must be exactly one of: high, medium, low
         assert b.status not in ["cancelled", "expired"], "Bounty is no longer active"
         assert int(b.total_completed) < int(b.max_workers), "All worker slots already paid out"
 
+        # Plain locals only, so the nondet closure never reads contract storage.
         before_url = b.before_image_url
         after_url = sub.after_image_url
         extra_url = additional_image_url
@@ -604,10 +628,24 @@ confidence must be exactly one of: high, medium, low
         self.submissions[submission_id].status = "appealed"
 
         def evaluate_appeal() -> str:
-            images = [before_url, after_url]
-            has_extra = bool(extra_url) and extra_url.startswith("http")
-            if has_extra:
-                images.append(extra_url)
+            try:
+                images = [_fetch_image(before_url), _fetch_image(after_url)]
+            except Exception:
+                return json.dumps({
+                    "verdict": "rejected",
+                    "reasoning": "Could not load the before and after images for appeal review",
+                    "confidence": "low"
+                }, sort_keys=True, separators=(',', ':'))
+
+            # The extra evidence photo is optional, so a failed fetch just
+            # means the appeal is judged without it.
+            has_extra = False
+            if extra_url and extra_url.startswith("http"):
+                try:
+                    images.append(_fetch_image(extra_url))
+                    has_extra = True
+                except Exception:
+                    has_extra = False
 
             prompt = f"""You are reviewing an appeal of a rejected or inconclusive infrastructure task submission.
 
@@ -646,14 +684,16 @@ Return ONLY valid JSON:
             except Exception:
                 return json.dumps({
                     "verdict": "rejected",
-                    "reasoning": "Could not load images for appeal review",
+                    "reasoning": "Could not run image review for the appeal",
                     "confidence": "low"
                 }, sort_keys=True, separators=(',', ':'))
 
             cleaned = result.replace("```json", "").replace("```", "").strip()
             try:
                 parsed = json.loads(cleaned)
-                verdict = self._normalize_verdict(parsed.get("verdict", "rejected"), ["approved", "rejected"])
+                verdict = _normalize_verdict_value(
+                    parsed.get("verdict", "rejected"), ["approved", "rejected"]
+                )
                 return json.dumps({
                     "verdict": verdict,
                     "reasoning": str(parsed.get("reasoning", "")),
@@ -764,6 +804,11 @@ Return ONLY valid JSON:
         return gl.storage.copy_to_memory(self.bounties[bounty_id])
 
     @gl.public.view
+    def get_submission(self, submission_id: str) -> Submission:
+        assert submission_id in self.submissions, "Submission not found"
+        return gl.storage.copy_to_memory(self.submissions[submission_id])
+
+    @gl.public.view
     def get_all_bounties(self) -> list[Bounty]:
         result = []
         for bid in self.bounty_ids:
@@ -779,121 +824,7 @@ Return ONLY valid JSON:
             if b.status == "open" and now < int(b.deadline):
                 result.append(gl.storage.copy_to_memory(b))
         return result
-
-    @gl.public.view
-    def get_bounties_by_category(self, category: str) -> list[Bounty]:
-        result = []
-        for bid in self.bounty_ids:
-            b = self.bounties[bid]
-            if b.category == category:
-                result.append(gl.storage.copy_to_memory(b))
-        return result
-
-    @gl.public.view
-    def get_bounty_claimants(self, bounty_id: str) -> list[str]:
-        assert bounty_id in self.bounty_claimants_csv, "Bounty not found"
-        csv = self.bounty_claimants_csv[bounty_id]
-        if csv == "":
-            return []
-        return csv.split(",")
-
-    @gl.public.view
-    def get_submission(self, submission_id: str) -> Submission:
-        assert submission_id in self.submissions, "Submission not found"
-        return gl.storage.copy_to_memory(self.submissions[submission_id])
-
-    @gl.public.view
-    def get_worker_submission(self, bounty_id: str, wallet: str) -> str:
-        key = self._claim_key(bounty_id, wallet)
-        if key in self.bounty_submissions:
-            return self.bounty_submissions[key]
-        return ""
-
-    @gl.public.view
-    def get_worker_claimed_bounty_ids(self, wallet: str) -> list[str]:
-        result = []
-        for bounty_id in self.bounty_ids:
-            if self._claim_key(bounty_id, wallet) in self.bounty_claims:
-                result.append(bounty_id)
-        return result
-
-    @gl.public.view
-    def get_worker_profile(self, wallet: str) -> WorkerProfile:
-        assert wallet in self.workers, "Worker not found"
-        return gl.storage.copy_to_memory(self.workers[wallet])
-
-    @gl.public.view
-    def worker_exists(self, wallet: str) -> bool:
-        return wallet in self.workers
-
-    @gl.public.view
-    def get_appeal(self, appeal_id: str) -> Appeal:
-        assert appeal_id in self.appeals, "Appeal not found"
-        return gl.storage.copy_to_memory(self.appeals[appeal_id])
-
+        
     @gl.public.view
     def has_claimed(self, bounty_id: str, wallet: str) -> bool:
         return self._claim_key(bounty_id, wallet) in self.bounty_claims
-
-    @gl.public.view
-    def get_total_bounties(self) -> i32:
-        return self.bounty_counter
-
-    @gl.public.view
-    def get_total_submissions(self) -> i32:
-        return self.submission_counter
-
-    @gl.public.view
-    def get_leaderboard(self) -> list[WorkerProfile]:
-        """
-        Returns all worker profiles.
-        Frontend should sort by reputation_score / total_earned_gen.
-        """
-        result = []
-        for wallet in self.worker_ids:
-            result.append(gl.storage.copy_to_memory(self.workers[wallet]))
-        return result
-
-    @gl.public.view
-    def get_top_workers(self, limit: i32) -> list[WorkerProfile]:
-        """
-        Returns up to `limit` workers sorted by reputation (desc),
-        then by total_earned_gen (desc).
-        """
-        profiles = []
-        for wallet in self.worker_ids:
-            profiles.append(gl.storage.copy_to_memory(self.workers[wallet]))
-
-        n = len(profiles)
-        for i in range(n):
-            for j in range(0, n - i - 1):
-                a = profiles[j]
-                b = profiles[j + 1]
-                a_better = (
-                    int(a.reputation_score) > int(b.reputation_score) or
-                    (
-                        int(a.reputation_score) == int(b.reputation_score) and
-                        int(a.total_earned_gen) > int(b.total_earned_gen)
-                    )
-                )
-                if not a_better:
-                    profiles[j], profiles[j + 1] = profiles[j + 1], profiles[j]
-
-        max_n = int(limit) if int(limit) > 0 else 10
-        return profiles[:max_n]
-
-    @gl.public.view
-    def get_worker_submissions(self, wallet: str) -> list[Submission]:
-        result = []
-        for sid in self.submission_ids:
-            sub = self.submissions[sid]
-            if sub.worker == wallet:
-                result.append(gl.storage.copy_to_memory(sub))
-        return result
-
-    @gl.public.view
-    def get_all_submissions(self) -> list[Submission]:
-        result = []
-        for sid in self.submission_ids:
-            result.append(gl.storage.copy_to_memory(self.submissions[sid]))
-        return result
