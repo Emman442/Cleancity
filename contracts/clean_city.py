@@ -804,11 +804,6 @@ Return ONLY valid JSON:
         return gl.storage.copy_to_memory(self.bounties[bounty_id])
 
     @gl.public.view
-    def get_submission(self, submission_id: str) -> Submission:
-        assert submission_id in self.submissions, "Submission not found"
-        return gl.storage.copy_to_memory(self.submissions[submission_id])
-
-    @gl.public.view
     def get_all_bounties(self) -> list[Bounty]:
         result = []
         for bid in self.bounty_ids:
@@ -828,28 +823,6 @@ Return ONLY valid JSON:
     @gl.public.view
     def has_claimed(self, bounty_id: str, wallet: str) -> bool:
         return self._claim_key(bounty_id, wallet) in self.bounty_claims
-    
-    @gl.public.view
-    def get_bounty(self, bounty_id: str) -> Bounty:
-        assert bounty_id in self.bounties, "Bounty not found"
-        return gl.storage.copy_to_memory(self.bounties[bounty_id])
-
-    @gl.public.view
-    def get_all_bounties(self) -> list[Bounty]:
-        result = []
-        for bid in self.bounty_ids:
-            result.append(gl.storage.copy_to_memory(self.bounties[bid]))
-        return result
-
-    @gl.public.view
-    def get_open_bounties(self) -> list[Bounty]:
-        result = []
-        now = int(datetime.now(timezone.utc).timestamp() * 1000)
-        for bid in self.bounty_ids:
-            b = self.bounties[bid]
-            if b.status == "open" and now < int(b.deadline):
-                result.append(gl.storage.copy_to_memory(b))
-        return result
 
     @gl.public.view
     def get_bounties_by_category(self, category: str) -> list[Bounty]:
@@ -901,15 +874,3 @@ Return ONLY valid JSON:
     def get_appeal(self, appeal_id: str) -> Appeal:
         assert appeal_id in self.appeals, "Appeal not found"
         return gl.storage.copy_to_memory(self.appeals[appeal_id])
-
-    @gl.public.view
-    def has_claimed(self, bounty_id: str, wallet: str) -> bool:
-        return self._claim_key(bounty_id, wallet) in self.bounty_claims
-
-    @gl.public.view
-    def get_total_bounties(self) -> i32:
-        return self.bounty_counter
-
-    @gl.public.view
-    def get_total_submissions(self) -> i32:
-        return self.submission_counter
